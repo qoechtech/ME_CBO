@@ -3,33 +3,30 @@ import { NextResponse, type NextRequest } from "next/server";
 /**
  * Edge guard for the Next.js frontend.
  *
- * Checks for the presence of the `me_access` or `me_refresh` cookie that
- * the NestJS API sets on login.
+ * Looks for the `me_access` / `me_refresh` cookies that the NestJS API sets
+ * on login. For the middleware to see them, they must be FIRST-PARTY to this
+ * site. Two supported setups:
  *
- * IMPORTANT — cross-origin cookie note:
- * If the API and web are on different domains (e.g. me-cbo-api.onrender.com
- * and me-cbo-web.onrender.com), the auth cookies are scoped to the API's
- * domain. The Next.js middleware CANNOT read them because the browser
- * does not send them with requests to the web domain.
+ *  1. (Current) Proxy the API through this app: next.config.mjs rewrites
+ *     /api/* to the API, and the frontend calls relative "/api/..." URLs.
+ *     The browser then only talks to one origin, so cookies are first-party.
+ *  2. A custom domain for both services, e.g. app.mecbo.org + api.mecbo.org,
+ *     with COOKIE_DOMAIN=.mecbo.org on the API.
  *
- * Two ways to fix that:
- *  1. Use a shared parent domain (recommended for production):
- *     api.mecbo.org + www.mecbo.org → both under `.mecbo.org`, cookies
- *     shared, middleware works as written below.
- *  2. On separate *.onrender.com subdomains, set COOKIE_DOMAIN=.onrender.com
- *     in the API env so the cookie is issued for the parent, and ensure
- *     the API sends Set-Cookie with Domain=.onrender.com.
+ * Do NOT rely on COOKIE_DOMAIN=.onrender.com: onrender.com is on the Public
+ * Suffix List, so browsers reject cookies scoped to it.
  *
- * If cookies are genuinely cross-domain and cannot be shared, rely on the
- * client-side AuthGuard (which calls /auth/me) instead of this middleware
- * to protect routes. This middleware is a fast-path optimization, not the
- * sole defense — the API always enforces auth.
+ * This middleware is a fast-path UX check, not a security boundary.
+ * The API enforces authentication and permissions on every request.
+ *
+ * NOTE: the cookie names below must match ACCESS_COOKIE / REFRESH_COOKIE in
+ * the API's auth.constants.ts.
  */
 
 const ACCESS_COOKIE = "me_access";
 const REFRESH_COOKIE = "me_refresh";
 
-/* ─── Route classification ───────────────────────────────────── */
+/* --- Route classification ------------------------------------ */
 
 const PROTECTED_PREFIXES = [
   "/dashboard",
@@ -54,25 +51,27 @@ const AUTH_PAGES = [
   "/verify-email",
 ];
 
-/* ─── Helpers ────────────────────────────────────────────────── */
+/* --- Helpers -------------------------------------------------- */
 
 function matchesPrefix(pathname: string, prefix: string): boolean {
   return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
 
-/* ─── Middleware ─────────────────────────────────────────────── */
+/* --- Middleware ----------------------------------------------- */
 
 export function middleware(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
 
-  const hasSession =
-    req.cookies.has(ACCESS_COOKIE) || req.cookies.has(REFRESH_COOKIE);
+  const hasAccess = req.cookies.has(ACCESS_COOKIE);
+  const hasRefresh = req.cookies.has(REFRESH_COOKIE);
 
   const isProtected = PROTECTED_PREFIXES.some((p) => matchesPrefix(pathname, p));
   const isAuthPage = AUTH_PAGES.some((p) => matchesPrefix(pathname, p));
 
-  /* --- 1. Protected route with no session → login ------------- */
-  if (isProtected && !hasSession) {
+  /* 1. Protected route with no session -> login.
+   *    An expired access token (15 min) with a still-valid refresh cookie is
+   *    let through so the client AuthGuard can refresh and retry. */
+  if (isProtected && !hasAccess && !hasRefresh) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
     url.search = "";
@@ -80,30 +79,30 @@ export function middleware(req: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  /* --- 2. Auth page with active session → dashboard ---------- */
-  if (isAuthPage && hasSession) {
+  /* 2. Auth page while logged in -> dashboard.
+   *    Only the ACCESS cookie counts here. A stale refresh cookie must not
+   *    bounce users away from /login, or the client guard and this redirect
+   *    can ping-pong forever. */
+  if (isAuthPage && hasAccess) {
     const url = req.nextUrl.clone();
     url.pathname = "/dashboard";
     url.search = "";
     return NextResponse.redirect(url);
   }
 
-  /* --- 3. Otherwise pass through ------------------------------ */
+  /* 3. Otherwise pass through. */
   return NextResponse.next();
 }
 
-/* ─── Matcher ────────────────────────────────────────────────── */
-/**
- * Run middleware on:
- *  - Page routes (exclude _next internals, static assets, images)
- * Do NOT run on:
- *  - /api/*               (Next.js route handlers)
- *  - /_next/*             (build artifacts)
- *  - /icons/*, /images/*  (static assets)
- *  - Any file with an extension (favicon.ico, manifest.webmanifest, sw.js, *.png, *.css, *.js, etc.)
+/* --- Matcher ---------------------------------------------------
+ * Run on page routes only. Skip:
+ *  - /api/*                (proxied to the NestJS API, must never be redirected)
+ *  - /_next/*              (build artifacts)
+ *  - /icons/*, /images/*   (static assets)
+ *  - any path with a file extension (favicon.ico, sw.js, *.png, *.css, ...)
  */
 export const config = {
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|icons|images|manifest.webmanifest|sw.js|.*\\..*).*)",
+    "/((?!api/|_next/static|_next/image|favicon.ico|icons/|images/|manifest.webmanifest|sw.js|.*\\..*).*)",
   ],
 };
