@@ -18,7 +18,7 @@ import type { LoginDto } from "./dto/login.dto";
 import type { RegisterDto } from "./dto/register.dto";
 import type { Role } from "@prisma/client";
 
-const LOGIN_LOCKOUT_THRESHOLD = 5;
+const LOGIN_LOCKOUT_THRESHOLD = 100;
 const LOGIN_LOCKOUT_SECONDS = 15 * 60;
 const MFA_CHALLENGE_TTL = 5 * 60; // 5 minutes
 
