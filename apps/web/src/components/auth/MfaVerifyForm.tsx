@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -12,22 +11,25 @@ import { useAuthStore } from "@/store/auth.store";
 const LENGTH = 6;
 
 export function MfaVerifyForm() {
-  const router = useRouter();
   const setUser = useAuthStore((s) => s.setUser);
   const [digits, setDigits] = useState<string[]>(Array(LENGTH).fill(""));
   const [submitting, setSubmitting] = useState(false);
   const [seconds, setSeconds] = useState(30);
   const [canResend, setCanResend] = useState(false);
+  const [challengeId, setChallengeId] = useState<string | null>(null);
   const inputsRef = useRef<Array<HTMLInputElement | null>>([]);
-  const challengeId =
-    typeof window !== "undefined"
-      ? sessionStorage.getItem("me_mfa_challenge") ?? ""
-      : "";
 
+  /* ---- Read challenge from sessionStorage after mount (SSR-safe) ---- */
   useEffect(() => {
-    if (!challengeId) router.replace("/login");
-  }, [challengeId, router]);
+    const id = sessionStorage.getItem("me_mfa_challenge");
+    if (!id) {
+      window.location.href = "/login";
+      return;
+    }
+    setChallengeId(id);
+  }, []);
 
+  /* ---- Resend cooldown ---- */
   useEffect(() => {
     if (seconds <= 0) {
       setCanResend(true);
@@ -47,10 +49,7 @@ export function MfaVerifyForm() {
     if (clean && idx < LENGTH - 1) inputsRef.current[idx + 1]?.focus();
   };
 
-  const onKeyDown = (
-    idx: number,
-    e: React.KeyboardEvent<HTMLInputElement>,
-  ) => {
+  const onKeyDown = (idx: number, e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Backspace" && !digits[idx] && idx > 0) {
       inputsRef.current[idx - 1]?.focus();
     }
@@ -60,7 +59,10 @@ export function MfaVerifyForm() {
   };
 
   const onPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
-    const text = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, LENGTH);
+    const text = e.clipboardData
+      .getData("text")
+      .replace(/\D/g, "")
+      .slice(0, LENGTH);
     if (!text) return;
     e.preventDefault();
     const arr = Array(LENGTH).fill("");
@@ -71,6 +73,11 @@ export function MfaVerifyForm() {
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!challengeId) {
+      toast.error("Session expired. Please sign in again.");
+      window.location.href = "/login";
+      return;
+    }
     const code = digits.join("");
     if (code.length !== LENGTH) {
       toast.error("Enter all 6 digits");
@@ -82,7 +89,10 @@ export function MfaVerifyForm() {
       sessionStorage.removeItem("me_mfa_challenge");
       setUser(user);
       toast.success("Verified. Welcome!");
-      router.replace("/dashboard");
+
+      // Full-page navigation — commits the Set-Cookie from the verify
+      // response BEFORE the middleware checks on /dashboard.
+      window.location.href = "/dashboard";
     } catch (err) {
       const msg =
         err instanceof ApiError
@@ -99,6 +109,7 @@ export function MfaVerifyForm() {
   };
 
   const resend = async () => {
+    if (!challengeId) return;
     try {
       await authApi.resendMfa(challengeId);
       toast.success("A new code is on the way.");
@@ -112,7 +123,10 @@ export function MfaVerifyForm() {
   return (
     <form onSubmit={onSubmit} className="space-y-5" noValidate>
       <div className="flex items-center gap-3 rounded-[var(--radius-md)] bg-[var(--bg-muted)] p-3">
-        <ShieldCheck className="h-5 w-5 shrink-0 text-[var(--primary)]" aria-hidden />
+        <ShieldCheck
+          className="h-5 w-5 shrink-0 text-[var(--primary)]"
+          aria-hidden
+        />
         <p className="text-sm text-[var(--fg-muted)]">
           Open your authenticator app and enter the 6-digit code for ME_CBO.
         </p>
@@ -122,7 +136,9 @@ export function MfaVerifyForm() {
         {digits.map((d, i) => (
           <input
             key={i}
-            ref={(el) => { inputsRef.current[i] = el; }}
+            ref={(el) => {
+              inputsRef.current[i] = el;
+            }}
             value={d}
             onChange={(e) => setDigit(i, e.target.value)}
             onKeyDown={(e) => onKeyDown(i, e)}
@@ -131,12 +147,19 @@ export function MfaVerifyForm() {
             autoComplete={i === 0 ? "one-time-code" : "off"}
             maxLength={1}
             aria-label={`Digit ${i + 1} of ${LENGTH}`}
-            className="h-14 w-full max-w-[56px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-elevated)] text-center text-2xl font-bold text-[var(--fg)] focus:border-[var(--accent)] focus-ring"
+            disabled={!challengeId}
+            className="h-14 w-full max-w-[56px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-elevated)] text-center text-2xl font-bold text-[var(--fg)] focus:border-[var(--accent)] focus-ring disabled:opacity-50"
           />
         ))}
       </div>
 
-      <Button type="submit" size="lg" fullWidth loading={submitting}>
+      <Button
+        type="submit"
+        size="lg"
+        fullWidth
+        loading={submitting}
+        disabled={!challengeId}
+      >
         Verify
       </Button>
 
@@ -145,7 +168,8 @@ export function MfaVerifyForm() {
           <button
             type="button"
             onClick={resend}
-            className="font-semibold text-[var(--primary)] hover:underline focus-ring rounded"
+            disabled={!challengeId}
+            className="font-semibold text-[var(--primary)] hover:underline focus-ring rounded disabled:opacity-50"
           >
             Resend code
           </button>
