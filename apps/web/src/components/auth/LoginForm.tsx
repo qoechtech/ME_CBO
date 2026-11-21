@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -21,7 +21,6 @@ const schema = z.object({
 type FormValues = z.infer<typeof schema>;
 
 export function LoginForm() {
-  const router = useRouter();
   const params = useSearchParams();
   const setUser = useAuthStore((s) => s.setUser);
   const [showPw, setShowPw] = useState(false);
@@ -40,17 +39,24 @@ export function LoginForm() {
     setSubmitting(true);
     try {
       const result = await authApi.login(values);
+
       if (result.mfaRequired) {
-        // Stash challenge in sessionStorage so the MFA page can read it
         sessionStorage.setItem("me_mfa_challenge", result.challengeId);
         toast.info("Enter your authenticator code to continue.");
-        router.push("/mfa/verify");
+        window.location.href = "/mfa/verify";
         return;
       }
+
       setUser(result.user);
       toast.success(`Welcome back, ${result.user.fullName.split(" ")[0]}!`);
+
       const next = params.get("next") || "/dashboard";
-      router.replace(next);
+
+      // Force a full-page navigation so the browser commits the HttpOnly
+      // cookies (me_access, me_refresh) BEFORE the middleware runs on the
+      // next request. Client-side router navigation skips this and causes
+      // a redirect loop back to /login.
+      window.location.href = next;
     } catch (err) {
       const msg =
         err instanceof ApiError
