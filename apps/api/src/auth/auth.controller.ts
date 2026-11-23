@@ -7,7 +7,6 @@ import {
   Req,
   Res,
   UnauthorizedException,
-  UseGuards,
 } from "@nestjs/common";
 import type { Request, Response } from "express";
 import { Throttle } from "@nestjs/throttler";
@@ -18,7 +17,12 @@ import { RegisterDto } from "./dto/register.dto";
 import { MfaVerifyDto } from "./dto/mfa-verify.dto";
 import { PasswordResetRequestDto } from "./dto/password-reset-request.dto";
 import { PasswordResetConfirmDto } from "./dto/password-reset-confirm.dto";
+import { PasswordChangeDto } from "./dto/password-change.dto";
 import { MfaSetupConfirmDto } from "./dto/mfa-setup-confirm.dto";
+import {
+  MfaSetupTicketStartDto,
+  MfaSetupTicketConfirmDto,
+} from "./dto/mfa-setup-ticket.dto";
 import {
   ACCESS_COOKIE,
   REFRESH_COOKIE,
@@ -29,31 +33,37 @@ import { CurrentUser } from "./decorators/current-user.decorator";
 import type { AccessClaims } from "./token.service";
 import { PrismaService } from "../prisma/prisma.service";
 
-const SECURE = process.env.COOKIE_SECURE === "true";
-const DOMAIN = process.env.COOKIE_DOMAIN ?? undefined;
+/**
+ * Cookie options are read when a response is built (not at import time),
+ * so values from .env / Render environment are always picked up.
+ * Leave COOKIE_DOMAIN unset when the frontend proxies /api to this API.
+ */
+function cookieBase() {
+  return {
+    httpOnly: true as const,
+    secure: process.env.COOKIE_SECURE === "true",
+    sameSite: "strict" as const,
+    domain: process.env.COOKIE_DOMAIN || undefined,
+  };
+}
 
 function setAuthCookies(res: Response, access: string, refresh: string) {
   res.cookie(ACCESS_COOKIE, access, {
-    httpOnly: true,
-    secure: SECURE,
-    sameSite: "strict",
-    domain: DOMAIN,
+    ...cookieBase(),
     path: "/",
     maxAge: 15 * 60 * 1000,
   });
   res.cookie(REFRESH_COOKIE, refresh, {
-    httpOnly: true,
-    secure: SECURE,
-    sameSite: "strict",
-    domain: DOMAIN,
+    ...cookieBase(),
     path: REFRESH_COOKIE_PATH,
     maxAge: 30 * 24 * 60 * 60 * 1000,
   });
 }
 
 function clearAuthCookies(res: Response) {
-  res.clearCookie(ACCESS_COOKIE, { path: "/", domain: DOMAIN });
-  res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH, domain: DOMAIN });
+  const domain = process.env.COOKIE_DOMAIN || undefined;
+  res.clearCookie(ACCESS_COOKIE, { path: "/", domain });
+  res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH, domain });
 }
 
 @ApiTags("auth")
@@ -74,8 +84,19 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const result = await this.auth.login(dto, req.ip ?? "unknown", req.headers["user-agent"] ?? "");
-    if (result.mfaRequired) return { mfaRequired: true, challengeId: result.challengeId };
+    const result = await this.auth.login(
+      dto,
+      req.ip ?? "unknown",
+      req.headers["user-agent"] ?? "",
+    );
+
+    // Admin without MFA yet: no cookies, just a short-lived setup ticket.
+    if ("mfaSetupRequired" in result) {
+      return { mfaSetupRequired: true, setupId: result.setupId };
+    }
+    if (result.mfaRequired) {
+      return { mfaRequired: true, challengeId: result.challengeId };
+    }
     setAuthCookies(res, result.access, result.refresh);
     return { mfaRequired: false, user: result.user };
   }
@@ -90,8 +111,10 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const result = await this.auth.verifyMfa(
-      dto.challengeId, dto.code,
-      req.ip ?? "unknown", req.headers["user-agent"] ?? "",
+      dto.challengeId,
+      dto.code,
+      req.ip ?? "unknown",
+      req.headers["user-agent"] ?? "",
     );
     if (result.mfaRequired) throw new UnauthorizedException();
     setAuthCookies(res, result.access, result.refresh);
@@ -103,7 +126,11 @@ export class AuthController {
   @Post("register")
   @HttpCode(201)
   async register(@Body() dto: RegisterDto, @Req() req: Request) {
-    const user = await this.auth.register(dto, req.ip ?? "unknown", req.headers["user-agent"] ?? "");
+    const user = await this.auth.register(
+      dto,
+      req.ip ?? "unknown",
+      req.headers["user-agent"] ?? "",
+    );
     return { user };
   }
 
@@ -114,7 +141,11 @@ export class AuthController {
   async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const raw = req.cookies?.[REFRESH_COOKIE] as string | undefined;
     if (!raw) throw new UnauthorizedException();
-    const result = await this.auth.refresh(raw, req.ip ?? "unknown", req.headers["user-agent"] ?? "");
+    const result = await this.auth.refresh(
+      raw,
+      req.ip ?? "unknown",
+      req.headers["user-agent"] ?? "",
+    );
     if (result.mfaRequired) throw new UnauthorizedException();
     setAuthCookies(res, result.access, result.refresh);
     return { user: result.user };
@@ -163,6 +194,29 @@ export class AuthController {
     return { ok: true };
   }
 
+  /** Signed-in member changes their own password. */
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("password/change")
+  @HttpCode(200)
+  async changePassword(
+    @CurrentUser() claims: AccessClaims,
+    @Body() dto: PasswordChangeDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const r = await this.auth.changePassword(
+      claims.sub,
+      dto.currentPassword,
+      dto.newPassword,
+      req.ip ?? "unknown",
+      req.headers["user-agent"] ?? "",
+    );
+    setAuthCookies(res, r.access, r.refresh);
+    return { ok: true };
+  }
+
+  /* ─── MFA setup for logged-in users ─────────────────────────── */
+
   @Post("mfa/setup/start")
   async mfaSetupStart(@CurrentUser() claims: AccessClaims) {
     return this.auth.startMfaSetup(claims.sub);
@@ -174,5 +228,36 @@ export class AuthController {
     @Body() dto: MfaSetupConfirmDto,
   ) {
     return this.auth.confirmMfaSetup(claims.sub, dto.code);
+  }
+
+  /* ─── MFA setup for admins enrolling at first login ─────────── */
+  /* These use the one-time setup ticket returned by login, so they
+     are public: the ticket is the proof that the password was correct. */
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post("mfa/setup/ticket/start")
+  @HttpCode(200)
+  async mfaTicketStart(@Body() dto: MfaSetupTicketStartDto) {
+    return this.auth.startMfaSetupWithTicket(dto.setupId);
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post("mfa/setup/ticket/confirm")
+  @HttpCode(200)
+  async mfaTicketConfirm(
+    @Body() dto: MfaSetupTicketConfirmDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const r = await this.auth.confirmMfaSetupWithTicket(
+      dto.setupId,
+      dto.code,
+      req.ip ?? "unknown",
+      req.headers["user-agent"] ?? "",
+    );
+    setAuthCookies(res, r.access, r.refresh);
+    return { user: r.user, backupCodes: r.backupCodes };
   }
 }
