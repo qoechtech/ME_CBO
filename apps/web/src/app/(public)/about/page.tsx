@@ -2,6 +2,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { siteConfig } from "@/config/site";
+import { SiteHeader } from "@/components/layout/SiteHeader";
 
 export const metadata: Metadata = {
   title: "About us",
@@ -31,6 +32,9 @@ export default function AboutPage() {
   const { registration, contact } = siteConfig;
 
   return (
+    <>
+      <SiteHeader />
+      <main>
     <article className="container-mobile mx-auto max-w-3xl space-y-10 py-12">
       <header>
         <h1 className="text-3xl font-bold">About {siteConfig.shortName}</h1>
@@ -122,5 +126,7 @@ export default function AboutPage() {
         </address>
       </section>
     </article>
+      </main>
+    </>
   );
 }
