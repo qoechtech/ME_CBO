@@ -1,25 +1,32 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
-  UnauthorizedException,
 } from "@nestjs/common";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
+import type { Role } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import { EmailService } from "../email/email.service";
-import { PasswordService } from "../auth/password.service";
-import { createHash, randomBytes } from "node:crypto";
-import type { Prisma, Role } from "@prisma/client";
 import type {
   SubmitApplicationDto,
   RejectApplicationDto,
   DirectoryQueryDto,
   UpdateProfileDto,
+  CreateMemberDto,
   ApplicationResponse,
   MemberResponse,
   MemberDetailResponse,
+  InviteResult,
 } from "./dto/members.dto";
+
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const ADMIN_ROLES: Role[] = ["OPERATIONS_ADMIN", "FINANCE_ADMIN"];
+
+type Actor = { id: string; role: Role };
 
 @Injectable()
 export class MembersService {
@@ -29,7 +36,6 @@ export class MembersService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly email: EmailService,
-    private readonly passwords: PasswordService,
   ) {}
 
   /* ─────────────────────────────────────────────────────────── */
@@ -38,14 +44,15 @@ export class MembersService {
   async submitApplication(dto: SubmitApplicationDto): Promise<{ id: string }> {
     const email = dto.email.toLowerCase();
 
-    const existingApp = await this.prisma.membershipApplication.findFirst({
-      where: { email, status: "PENDING" },
-    });
+    const [existingApp, existingUser] = await Promise.all([
+      this.prisma.membershipApplication.findFirst({
+        where: { email: { equals: email, mode: "insensitive" }, status: "PENDING" },
+      }),
+      this.findUserByEmail(email),
+    ]);
     if (existingApp) {
       throw new BadRequestException("An application from this email is already pending review");
     }
-
-    const existingUser = await this.prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       throw new BadRequestException("A member with this email already exists");
     }
@@ -72,74 +79,81 @@ export class MembersService {
   /* ─────────────────────────────────────────────────────────── */
   /*  Admin: list applications                                  */
   /* ─────────────────────────────────────────────────────────── */
-  async listApplications(status?: "PENDING" | "APPROVED" | "REJECTED"): Promise<ApplicationResponse[]> {
+  async listApplications(
+    status?: "PENDING" | "APPROVED" | "REJECTED",
+  ): Promise<ApplicationResponse[]> {
     const apps = await this.prisma.membershipApplication.findMany({
       where: status ? { status } : undefined,
       orderBy: { submittedAt: "desc" },
+      take: 500,
     });
-    return apps.map(this.toApplicationResponse);
+    return apps.map((a) => this.toApplicationResponse(a));
   }
 
   /* ─────────────────────────────────────────────────────────── */
   /*  Admin: approve                                            */
   /* ─────────────────────────────────────────────────────────── */
-  async approveApplication(appId: string, actorId: string): Promise<ApplicationResponse> {
+  async approveApplication(
+    appId: string,
+    actorId: string,
+  ): Promise<{ application: ApplicationResponse; emailSent: boolean }> {
     const app = await this.prisma.membershipApplication.findUnique({ where: { id: appId } });
     if (!app) throw new NotFoundException("Application not found");
-    if (app.status !== "PENDING") throw new BadRequestException(`Application already ${app.status.toLowerCase()}`);
+    if (app.status !== "PENDING") {
+      throw new BadRequestException(`Application already ${app.status.toLowerCase()}`);
+    }
 
-    // Create the user with a random temporary password (they'll reset it via email)
-    const tempPassword = randomBytes(16).toString("hex");
-    const passwordHash = await this.passwords.hash(tempPassword);
+    const email = app.email.trim().toLowerCase();
+    if (await this.findUserByEmail(email)) {
+      throw new BadRequestException("A member with this email already exists");
+    }
 
-    const user = await this.prisma.user.create({
-      data: {
-        email: app.email,
-        fullName: app.fullName,
-        phone: app.phone,
-        passwordHash,
-        role: "MEMBER",
-        status: "PENDING", // becomes ACTIVE after email verification
-        skills: app.skills,
-        motivation: app.motivation,
-      },
-    });
+    // The admin has vouched for this person, so the account starts ACTIVE.
+    // The member sets their own password through the emailed link.
+    const userId = randomUUID();
+    let updated;
+    try {
+      [, updated] = await this.prisma.$transaction([
+        this.prisma.user.create({
+          data: {
+            id: userId,
+            email,
+            fullName: app.fullName,
+            phone: app.phone,
+            passwordHash: this.unusablePasswordHash(),
+            role: "MEMBER",
+            status: "ACTIVE",
+            skills: app.skills,
+            motivation: app.motivation,
+          },
+        }),
+        this.prisma.membershipApplication.update({
+          where: { id: appId },
+          data: {
+            status: "APPROVED",
+            reviewedById: actorId,
+            reviewedAt: new Date(),
+            userId,
+          },
+        }),
+      ]);
+    } catch (err) {
+      if (this.isUniqueViolation(err)) {
+        throw new BadRequestException("A member with this email already exists");
+      }
+      throw err;
+    }
 
-    const updated = await this.prisma.membershipApplication.update({
-      where: { id: appId },
-      data: {
-        status: "APPROVED",
-        reviewedById: actorId,
-        reviewedAt: new Date(),
-        userId: user.id,
-      },
-    });
-
-    // Create email-verification token + send email
-    const token = randomBytes(32).toString("hex");
-    const tokenHash = createHash("sha256").update(token).digest("hex");
-    await this.prisma.emailVerification.create({
-      data: {
-        userId: user.id,
-        tokenHash,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      },
-    });
-
-    const siteUrl = process.env.APP_ORIGIN ?? "http://localhost:3000";
-    const verifyUrl = `${siteUrl}/verify-email?token=${token}`;
-    void this.email
-      .sendVerification(user.email, user.fullName, verifyUrl)
-      .catch((err) => this.logger.error(`Verification email failed: ${(err as Error).message}`));
+    const emailSent = await this.sendInvite({ id: userId, email, fullName: app.fullName });
 
     void this.audit.record({
       actorId,
       action: "members.application.approve",
       target: appId,
-      metadata: { userId: user.id },
+      metadata: { userId, emailSent },
     });
 
-    return this.toApplicationResponse(updated);
+    return { application: this.toApplicationResponse(updated), emailSent };
   }
 
   /* ─────────────────────────────────────────────────────────── */
@@ -152,7 +166,9 @@ export class MembersService {
   ): Promise<ApplicationResponse> {
     const app = await this.prisma.membershipApplication.findUnique({ where: { id: appId } });
     if (!app) throw new NotFoundException("Application not found");
-    if (app.status !== "PENDING") throw new BadRequestException(`Application already ${app.status.toLowerCase()}`);
+    if (app.status !== "PENDING") {
+      throw new BadRequestException(`Application already ${app.status.toLowerCase()}`);
+    }
 
     const updated = await this.prisma.membershipApplication.update({
       where: { id: appId },
@@ -175,7 +191,91 @@ export class MembersService {
   }
 
   /* ─────────────────────────────────────────────────────────── */
+  /*  Admin: add a member directly                              */
+  /* ─────────────────────────────────────────────────────────── */
+  async createMember(dto: CreateMemberDto, actor: Actor): Promise<InviteResult> {
+    const role: Role = dto.role ?? "MEMBER";
+    // Only a super admin may create another admin.
+    if (ADMIN_ROLES.includes(role) && actor.role !== "SUPER_ADMIN") {
+      throw new ForbiddenException("Only a super admin can add an administrator");
+    }
+
+    const email = dto.email.trim().toLowerCase();
+    if (await this.findUserByEmail(email)) {
+      throw new BadRequestException("A member with this email already exists");
+    }
+
+    let user;
+    try {
+      user = await this.prisma.user.create({
+        data: {
+          email,
+          fullName: dto.fullName,
+          phone: dto.phone ?? null,
+          location: dto.location ?? null,
+          skills: dto.skills ?? [],
+          passwordHash: this.unusablePasswordHash(),
+          role,
+          status: "ACTIVE",
+        },
+      });
+    } catch (err) {
+      if (this.isUniqueViolation(err)) {
+        throw new BadRequestException("A member with this email already exists");
+      }
+      throw err;
+    }
+
+    // If this person had applied, close that application.
+    await this.prisma.membershipApplication.updateMany({
+      where: { email: { equals: email, mode: "insensitive" }, status: "PENDING" },
+      data: {
+        status: "APPROVED",
+        reviewedById: actor.id,
+        reviewedAt: new Date(),
+        userId: user.id,
+        reviewNote: "Added directly by an administrator",
+      },
+    });
+
+    const emailSent = await this.sendInvite(user);
+
+    void this.audit.record({
+      actorId: actor.id,
+      action: "members.create",
+      target: user.id,
+      metadata: { email, role, emailSent },
+    });
+
+    return { member: this.toMemberResponse(user), emailSent };
+  }
+
+  /** Sends a fresh "set your password" link to a member who has not signed in yet. */
+  async resendInvite(userId: string, actorId: string): Promise<InviteResult> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException("Member not found");
+    if (user.status === "SUSPENDED") {
+      throw new BadRequestException("This account is suspended");
+    }
+    if (user.lastLoginAt) {
+      throw new BadRequestException(
+        "This member has already signed in. They can use “Forgot password” if needed.",
+      );
+    }
+
+    const emailSent = await this.sendInvite(user);
+    void this.audit.record({
+      actorId,
+      action: "members.invite.resend",
+      target: user.id,
+      metadata: { emailSent },
+    });
+    return { member: this.toMemberResponse(user), emailSent };
+  }
+
+  /* ─────────────────────────────────────────────────────────── */
   /*  Verify email → activates the account                      */
+  /*  (kept for accounts that still hold a verification link)   */
   /* ─────────────────────────────────────────────────────────── */
   async verifyEmail(token: string): Promise<{ ok: true }> {
     const tokenHash = createHash("sha256").update(token).digest("hex");
@@ -195,11 +295,7 @@ export class MembersService {
       }),
     ]);
 
-    void this.audit.record({
-      actorId: row.userId,
-      action: "auth.email.verified",
-    });
-
+    void this.audit.record({ actorId: row.userId, action: "auth.email.verified" });
     return { ok: true };
   }
 
@@ -233,46 +329,28 @@ export class MembersService {
       },
     });
 
-    return users.map((u) => ({
-      id: u.id,
-      fullName: u.fullName,
-      email: u.email,
-      phone: u.phone,
-      role: u.role,
-      status: u.status,
-      joinedAt: u.createdAt.toISOString(),
-      skills: u.skills,
-      location: u.location,
-      avatarUrl: u.avatarUrl,
-    }));
+    return users.map((u) => this.toMemberResponse(u));
   }
 
   /* ─────────────────────────────────────────────────────────── */
   /*  Member detail + personal metrics                          */
   /* ─────────────────────────────────────────────────────────── */
   async memberDetail(userId: string): Promise<MemberDetailResponse> {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    const [user, rows] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId } }),
+      this.prisma.impactLog.groupBy({
+        by: ["type"],
+        where: { userId },
+        _sum: { value: true },
+      }),
+    ]);
     if (!user) throw new NotFoundException("Member not found");
 
-    const rows = await this.prisma.impactLog.groupBy({
-      by: ["type"],
-      where: { userId },
-      _sum: { value: true },
-    });
     const m = { TREES_PLANTED: 0, WASTE_COLLECTED: 0, HOURS_VOLUNTEERED: 0, EVENT_ATTENDED: 0, CARBON_OFFSET: 0 };
     for (const r of rows) m[r.type] = r._sum.value ?? 0;
 
     return {
-      id: user.id,
-      fullName: user.fullName,
-      email: user.email,
-      phone: user.phone,
-      role: user.role,
-      status: user.status,
-      joinedAt: user.createdAt.toISOString(),
-      skills: user.skills,
-      location: user.location,
-      avatarUrl: user.avatarUrl,
+      ...this.toMemberResponse(user),
       bio: user.bio,
       metrics: {
         treesPlanted: m.TREES_PLANTED,
@@ -306,23 +384,81 @@ export class MembersService {
       metadata: { fields: Object.keys(dto) },
     });
 
-    return {
-      id: user.id,
-      fullName: user.fullName,
-      email: user.email,
-      phone: user.phone,
-      role: user.role,
-      status: user.status,
-      joinedAt: user.createdAt.toISOString(),
-      skills: user.skills,
-      location: user.location,
-      avatarUrl: user.avatarUrl,
-    };
+    return this.toMemberResponse(user);
   }
 
   /* ─────────────────────────────────────────────────────────── */
   /*  Helpers                                                   */
   /* ─────────────────────────────────────────────────────────── */
+
+  /**
+   * Creates a 7-day "set your password" link (it cancels older unused links)
+   * and emails it. Returns false if the email could not be sent.
+   */
+  private async sendInvite(user: { id: string; email: string; fullName: string }): Promise<boolean> {
+    const token = randomBytes(32).toString("hex");
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+
+    await this.prisma.$transaction([
+      this.prisma.passwordReset.updateMany({
+        where: { userId: user.id, usedAt: null },
+        data: { usedAt: new Date() },
+      }),
+      this.prisma.passwordReset.create({
+        data: {
+          userId: user.id,
+          tokenHash,
+          expiresAt: new Date(Date.now() + INVITE_TTL_MS),
+        },
+      }),
+    ]);
+
+    const siteUrl = process.env.APP_ORIGIN?.split(",")[0]?.trim() ?? "http://localhost:3000";
+    const url = `${siteUrl}/reset-password?token=${token}&welcome=1`;
+    try {
+      await this.email.sendInvite(user.email, user.fullName, url);
+      return true;
+    } catch (err) {
+      this.logger.error(`Invitation email failed for ${user.email}: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /** A value that can never match any password; the member sets a real one by email. */
+  private unusablePasswordHash(): string {
+    return `!invite:${randomBytes(24).toString("hex")}`;
+  }
+
+  private findUserByEmail(email: string) {
+    return this.prisma.user.findFirst({
+      where: { email: { equals: email, mode: "insensitive" } },
+      select: { id: true },
+    });
+  }
+
+  private isUniqueViolation(err: unknown): boolean {
+    return err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
+  }
+
+  private toMemberResponse(u: {
+    id: string; fullName: string; email: string; phone: string | null;
+    role: Role; status: "PENDING" | "ACTIVE" | "SUSPENDED"; createdAt: Date;
+    skills: string[]; location: string | null; avatarUrl: string | null;
+  }): MemberResponse {
+    return {
+      id: u.id,
+      fullName: u.fullName,
+      email: u.email,
+      phone: u.phone,
+      role: u.role,
+      status: u.status,
+      joinedAt: u.createdAt.toISOString(),
+      skills: u.skills,
+      location: u.location,
+      avatarUrl: u.avatarUrl,
+    };
+  }
+
   private toApplicationResponse(a: {
     id: string; fullName: string; email: string; phone: string;
     motivation: string; skills: string[]; submittedAt: Date;
