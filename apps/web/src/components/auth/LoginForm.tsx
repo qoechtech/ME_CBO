@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -12,6 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { authApi } from "@/lib/api/auth.api";
 import { ApiError } from "@/lib/api/client";
 import { useAuthStore } from "@/store/auth.store";
+import { safeNext } from "@/lib/auth/next";
 
 const schema = z.object({
   email: z.string().email("Enter a valid email"),
@@ -21,7 +24,9 @@ const schema = z.object({
 type FormValues = z.infer<typeof schema>;
 
 export function LoginForm() {
+  const router = useRouter();
   const params = useSearchParams();
+  const queryClient = useQueryClient();
   const setUser = useAuthStore((s) => s.setUser);
   const [showPw, setShowPw] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -39,25 +44,32 @@ export function LoginForm() {
     setSubmitting(true);
     try {
       const result = await authApi.login(values);
+      const next = safeNext(params.get("next"));
 
-      if (result.mfaRequired) {
-        sessionStorage.setItem("me_mfa_challenge", result.challengeId);
-        toast.info("Enter your authenticator code to continue.");
-        window.location.href = "/mfa/verify";
+      // Admin must enroll in two-factor authentication first.
+      if ("mfaSetupRequired" in result) {
+        sessionStorage.setItem("me_mfa_setup", result.setupId);
+        toast.info("Set up two-factor authentication to continue.");
+        router.push("/mfa/setup");
         return;
       }
 
+      if (result.mfaRequired) {
+        // Stash challenge in sessionStorage so the MFA page can read it
+        sessionStorage.setItem("me_mfa_challenge", result.challengeId);
+        toast.info("Enter your authenticator code to continue.");
+        router.push(`/mfa/verify?next=${encodeURIComponent(next)}`);
+        return;
+      }
+
+      // Seed the session cache so the dashboard does not flash a spinner.
+      queryClient.setQueryData(["auth", "me"], result.user);
       setUser(result.user);
       toast.success(`Welcome back, ${result.user.fullName.split(" ")[0]}!`);
-
-      const next = params.get("next") || "/dashboard";
-
-      // Force a full-page navigation so the browser commits the HttpOnly
-      // cookies (me_access, me_refresh) BEFORE the middleware runs on the
-      // next request. Client-side router navigation skips this and causes
-      // a redirect loop back to /login.
-      window.location.href = next;
+      router.replace(next);
     } catch (err) {
+      // Keep the real reason in the browser console for debugging.
+      console.error("Login error:", err);
       const msg =
         err instanceof ApiError
           ? err.status === 429
@@ -100,6 +112,15 @@ export function LoginForm() {
           {showPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
           {showPw ? "Hide" : "Show"} password
         </button>
+      </div>
+
+      <div className="text-right">
+        <Link
+          href="/forgot-password"
+          className="text-sm font-medium text-[var(--primary)] hover:underline focus-ring rounded"
+        >
+          Forgot password?
+        </Link>
       </div>
 
       <Button type="submit" size="lg" fullWidth loading={submitting}>
