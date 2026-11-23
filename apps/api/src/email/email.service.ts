@@ -8,6 +8,7 @@ import * as Handlebars from "handlebars";
 type TemplateName =
   | "verify-email"
   | "reset-password"
+  | "set-password"
   | "donation-receipt"
   | "certificate-delivery";
 
@@ -27,6 +28,10 @@ export class EmailService implements OnModuleInit {
       host: process.env.SMTP_HOST ?? "localhost",
       port: Number(process.env.SMTP_PORT ?? 587),
       secure: process.env.SMTP_SECURE === "true",
+      // Fail fast instead of hanging a request when the mail server is slow.
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 15_000,
       auth: process.env.SMTP_USER
         ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS ?? "" }
         : undefined,
@@ -36,6 +41,7 @@ export class EmailService implements OnModuleInit {
     const names: TemplateName[] = [
       "verify-email",
       "reset-password",
+      "set-password",
       "donation-receipt",
       "certificate-delivery",
     ];
@@ -49,12 +55,13 @@ export class EmailService implements OnModuleInit {
       }
     }
 
-    try {
-      await this.transporter.verify();
-      this.logger.log("SMTP transporter ready");
-    } catch (err) {
-      this.logger.warn(`SMTP verify failed (dev continues): ${(err as Error).message}`);
-    }
+    // Do not block start-up on the mail server.
+    void this.transporter
+      .verify()
+      .then(() => this.logger.log("SMTP transporter ready"))
+      .catch((err) =>
+        this.logger.warn(`SMTP verify failed (dev continues): ${(err as Error).message}`),
+      );
   }
 
   private async send(
@@ -82,6 +89,17 @@ export class EmailService implements OnModuleInit {
     const tpl = this.templates.get("reset-password");
     if (!tpl) throw new Error("reset-password template missing");
     await this.send(to, "Reset your ME_CBO password", tpl({ resetUrl }));
+  }
+
+  /** Welcome email for members added or approved by an admin: set your password. */
+  async sendInvite(to: string, fullName: string, setPasswordUrl: string): Promise<void> {
+    const tpl = this.templates.get("set-password");
+    if (!tpl) throw new Error("set-password template missing");
+    await this.send(
+      to,
+      "Welcome to ME_CBO — set your password",
+      tpl({ fullName, setPasswordUrl }),
+    );
   }
 
   async sendDonationReceipt(
