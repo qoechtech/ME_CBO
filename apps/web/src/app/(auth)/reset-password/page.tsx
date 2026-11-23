@@ -9,7 +9,8 @@ import { authApi } from "@/lib/api/auth.api";
 import { ApiError } from "@/lib/api/client";
 
 function ResetForm() {
-  const token = useSearchParams().get("token") ?? "";
+  const params = useSearchParams();
+  const token = params.get("token") ?? "";
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
@@ -101,12 +102,26 @@ function ResetForm() {
   );
 }
 
+function Page() {
+  const welcome = useSearchParams().get("welcome") === "1";
+  return (
+    <AuthShell
+      title={welcome ? "Welcome! Set your password" : "Choose a new password"}
+      subtitle={
+        welcome
+          ? "Choose a password to activate your ME_CBO account."
+          : "Pick something long and unique."
+      }
+    >
+      <ResetForm />
+    </AuthShell>
+  );
+}
+
 export default function ResetPasswordPage() {
   return (
-    <AuthShell title="Choose a new password" subtitle="Pick something long and unique.">
-      <Suspense fallback={null}>
-        <ResetForm />
-      </Suspense>
-    </AuthShell>
+    <Suspense fallback={null}>
+      <Page />
+    </Suspense>
   );
 }
