@@ -4,7 +4,7 @@ export type Permission =
   | "events:read" | "events:create" | "events:update" | "events:delete"
   | "events:checkin" | "events:proof:verify"
   | "impact:read" | "impact:read:all" | "impact:log" | "impact:certificate:issue"
-  | "members:read" | "members:approve" | "members:manage"
+  | "members:read" | "members:approve" | "members:create" | "members:manage"
   | "inventory:read" | "inventory:checkout" | "inventory:approve"
   | "incidents:read" | "incidents:create" | "incidents:resolve"
   | "swap:read" | "swap:create"
@@ -17,7 +17,7 @@ const ROLES: Record<Role, Permission[]> = {
   SUPER_ADMIN: [
     "events:read","events:create","events:update","events:delete","events:checkin","events:proof:verify",
     "impact:read","impact:read:all","impact:log","impact:certificate:issue",
-    "members:read","members:approve","members:manage",
+    "members:read","members:approve","members:create","members:manage",
     "inventory:read","inventory:checkout","inventory:approve",
     "incidents:read","incidents:create","incidents:resolve",
     "swap:read","swap:create","learning:read","learning:manage",
@@ -28,7 +28,7 @@ const ROLES: Record<Role, Permission[]> = {
   OPERATIONS_ADMIN: [
     "events:read","events:create","events:update","events:delete","events:checkin","events:proof:verify",
     "impact:read","impact:read:all","impact:certificate:issue",
-    "members:read","members:approve",
+    "members:read","members:approve","members:create",
     "inventory:read","incidents:read","incidents:create","incidents:resolve",
     "swap:read","learning:read","learning:manage","petitions:manage",
   ],
