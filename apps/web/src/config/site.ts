@@ -44,7 +44,6 @@ export type NavItem = {
 export const publicNav: NavItem[] = [
   { label: "Home", href: "/", icon: "Home" },
   { label: "About", href: "/about", icon: "Info" },
-  { label: "Impact", href: "/impact", icon: "Leaf" },
   { label: "Blog", href: "/blog", icon: "Newspaper" },
   { label: "Donate", href: "/donate", icon: "HeartHandshake" },
 ];
