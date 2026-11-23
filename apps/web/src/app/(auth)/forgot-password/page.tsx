@@ -1,61 +1,72 @@
+// apps/web/src/app/(auth)/forgot-password/page.tsx
 "use client";
 
 import { useState } from "react";
 import Link from "next/link";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
-import { toast } from "sonner";
 import { AuthShell } from "@/components/auth/AuthShell";
-import { Input } from "@/components/ui/Input";
-import { Button } from "@/components/ui/Button";
-import { api, ApiError } from "@/lib/api/client";
-
-const schema = z.object({ email: z.string().email("Enter a valid email") });
-type Values = z.infer<typeof schema>;
+import { authApi } from "@/lib/api/auth.api";
 
 export default function ForgotPasswordPage() {
-  const [submitting, setSubmitting] = useState(false);
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
-  const { register, handleSubmit, formState: { errors } } = useForm<Values>({
-    resolver: zodResolver(schema),
-  });
+  const [error, setError] = useState<string | null>(null);
 
-  const onSubmit = async (values: Values) => {
-    setSubmitting(true);
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
     try {
-      await api.post("/auth/password/reset-request", values);
+      await authApi.requestPasswordReset(email.trim().toLowerCase());
       setSent(true);
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : "Could not send reset link.";
-      toast.error(msg);
+      console.error("Password reset request error:", err);
+      setError("We could not send the request. Please try again.");
     } finally {
-      setSubmitting(false);
+      setBusy(false);
     }
-  };
+  }
 
   return (
     <AuthShell
-      title="Forgot password"
-      subtitle="We'll email you a link to reset it."
-      footer={<Link href="/login" className="text-[var(--primary)] font-semibold">Back to sign in</Link>}
+      title="Forgot your password?"
+      subtitle="Enter your email and we will send you a reset link."
+      footer={
+        <Link href="/login" className="font-medium underline">
+          Back to sign in
+        </Link>
+      }
     >
       {sent ? (
-        <p className="text-sm text-[var(--fg-muted)]">
-          If an account exists for that email, a reset link is on its way. Check your inbox (and spam).
+        <p role="status" className="rounded-lg border p-4 text-sm">
+          If an account exists for <strong>{email}</strong>, a reset link is on its way.
+          Check your inbox (and spam folder). The link expires soon.
         </p>
       ) : (
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
-          <Input
-            label="Email"
-            type="email"
-            autoComplete="email"
-            error={errors.email?.message}
-            {...register("email")}
-          />
-          <Button type="submit" size="lg" fullWidth loading={submitting}>
-            Send reset link
-          </Button>
+        <form onSubmit={onSubmit} className="space-y-4" noValidate>
+          <label className="block text-sm font-medium">
+            Email
+            <input
+              type="email"
+              required
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="mt-1 w-full rounded-lg border px-3 py-2.5 text-base"
+            />
+          </label>
+          {error && (
+            <p role="alert" className="text-sm text-red-600">
+              {error}
+            </p>
+          )}
+          <button
+            type="submit"
+            disabled={busy || !email}
+            className="w-full rounded-lg bg-[#14532d] px-4 py-2.5 font-semibold text-white disabled:opacity-60"
+          >
+            {busy ? "Sending…" : "Send reset link"}
+          </button>
         </form>
       )}
     </AuthShell>
