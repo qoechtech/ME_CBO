@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { posts } from "@/content/posts";
+import { SiteHeader } from "@/components/layout/SiteHeader";
 
 type Props = { params: { slug: string } };
 
@@ -20,6 +21,9 @@ export default function PostPage({ params }: Props) {
   if (!post) notFound();
 
   return (
+    <>
+      <SiteHeader />
+      <main>
     <article className="container-mobile mx-auto max-w-3xl py-12">
       <Link href="/blog" className="text-sm underline">← All stories</Link>
       <h1 className="mt-4 text-3xl font-bold">{post.title}</h1>
@@ -36,5 +40,7 @@ export default function PostPage({ params }: Props) {
         ))}
       </div>
     </article>
+      </main>
+    </>
   );
 }
