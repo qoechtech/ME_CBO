@@ -2,6 +2,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { posts } from "@/content/posts";
+import { SiteHeader } from "@/components/layout/SiteHeader";
 
 export const metadata: Metadata = {
   title: "Blog",
@@ -18,6 +19,9 @@ function fmt(date: string) {
 
 export default function BlogPage() {
   return (
+    <>
+      <SiteHeader />
+      <main>
     <section className="container-mobile mx-auto max-w-3xl py-12">
       <h1 className="text-3xl font-bold">Blog</h1>
       <p className="mt-2">News and stories from our work in Mosoriot.</p>
@@ -41,5 +45,7 @@ export default function BlogPage() {
         </ul>
       )}
     </section>
+      </main>
+    </>
   );
 }
